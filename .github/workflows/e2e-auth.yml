@@ -83,11 +83,14 @@ jobs:
 
       # Runs every test on its own Endform machine. The preview server from the
       # config's webServer keeps running on this job, and Endform routes the
-      # runners' localhost traffic back to it.
+      # runners' localhost traffic back to it. The runners have no studio
+      # node_modules, so the DOM prop leak guard's vocabulary is written here
+      # first and shipped to them (see e2e/endform.config.ts).
       - name: Run auth E2E tests (Endform)
         if: matrix.runner == 'endform' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         working-directory: e2e
         run: |
+          pnpm run dom-prop-vocabulary
           args=(--repeat-each "${REPEAT_EACH:-1}")
           if [ -n "${RETRIES}" ]; then args+=(--retries "${RETRIES}"); fi
           npx --yes endform@0.81.5 test --organization-id OQXolTtG --config=playwright.auth.config.ts "${args[@]}"
