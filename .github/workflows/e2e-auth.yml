@@ -4,6 +4,16 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      repeat_each:
+        description: "Run each test N times (passed to both runners as --repeat-each)"
+        required: false
+        default: "1"
+      retries:
+        description: "Override the config's retries (empty keeps the config value)"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -11,8 +21,18 @@ concurrency:
 
 jobs:
   auth-e2e:
-    timeout-minutes: 15
+    name: Auth E2E (${{ matrix.runner }})
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 45 || 15 }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same suite on plain Playwright and on Endform, so every run
+        # yields a side-by-side comparison on the same commit.
+        runner: [playwright, endform]
+    permissions:
+      contents: read
+      pull-requests: read
     env:
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_TEAM: ${{ vars.TURBO_TEAM }}
@@ -21,19 +41,20 @@ jobs:
 
       - uses: ./.github/actions/detect-code-changes
         id: changes
+        if: github.event_name != 'workflow_dispatch'
 
       - uses: ./.github/actions/setup
-        if: steps.changes.outputs.has_changes == 'true'
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true'
 
       - name: Store Playwright's Version
-        if: steps.changes.outputs.has_changes == 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         id: playwright-version
         run: |
           PLAYWRIGHT_VERSION=$(pnpm exec playwright --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "version=${PLAYWRIGHT_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright Browsers
-        if: steps.changes.outputs.has_changes == 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         id: cache-playwright-browsers
         uses: actions/cache@v6
         with:
@@ -41,15 +62,37 @@ jobs:
           key: ${{ steps.playwright-version.outputs.version }}-playwright-browsers-chromium
 
       - name: Install Playwright Browsers
-        if: steps.changes.outputs.has_changes == 'true' && steps.cache-playwright-browsers.outputs.cache-hit != 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true') && steps.cache-playwright-browsers.outputs.cache-hit != 'true'
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Build packages and auth-test-studio
-        if: steps.changes.outputs.has_changes == 'true'
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true'
         run: pnpm build --filter=auth-test-studio...
 
-      - name: Run auth E2E tests
-        if: steps.changes.outputs.has_changes == 'true'
-        run: pnpm --filter e2e test:auth
+      - name: Run auth E2E tests (Playwright)
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
+        working-directory: e2e
+        run: |
+          args=(--repeat-each "${REPEAT_EACH:-1}")
+          if [ -n "${RETRIES}" ]; then args+=(--retries "${RETRIES}"); fi
+          pnpm exec playwright test --config=playwright.auth.config.ts "${args[@]}"
         env:
           CI: "true"
+          REPEAT_EACH: ${{ inputs.repeat_each }}
+          RETRIES: ${{ inputs.retries }}
+
+      # Runs every test on its own Endform machine. The preview server from the
+      # config's webServer keeps running on this job, and Endform routes the
+      # runners' localhost traffic back to it.
+      - name: Run auth E2E tests (Endform)
+        if: matrix.runner == 'endform' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
+        working-directory: e2e
+        run: |
+          args=(--repeat-each "${REPEAT_EACH:-1}")
+          if [ -n "${RETRIES}" ]; then args+=(--retries "${RETRIES}"); fi
+          npx --yes endform@0.81.5 test --organization-id OQXolTtG --config=playwright.auth.config.ts "${args[@]}"
+        env:
+          CI: "true"
+          ENDFORM_API_KEY: ${{ secrets.ENDFORM_API_KEY }}
+          REPEAT_EACH: ${{ inputs.repeat_each }}
+          RETRIES: ${{ inputs.retries }}
