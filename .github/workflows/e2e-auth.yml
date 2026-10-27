@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -11,8 +12,17 @@ concurrency:
 
 jobs:
   auth-e2e:
+    name: Auth E2E (${{ matrix.runner }})
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [playwright, endform]
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
     env:
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_TEAM: ${{ vars.TURBO_TEAM }}
@@ -21,19 +31,20 @@ jobs:
 
       - uses: ./.github/actions/detect-code-changes
         id: changes
+        if: github.event_name != 'workflow_dispatch'
 
       - uses: ./.github/actions/setup
-        if: steps.changes.outputs.has_changes == 'true'
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true'
 
       - name: Store Playwright's Version
-        if: steps.changes.outputs.has_changes == 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         id: playwright-version
         run: |
           PLAYWRIGHT_VERSION=$(pnpm exec playwright --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           echo "version=${PLAYWRIGHT_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright Browsers
-        if: steps.changes.outputs.has_changes == 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         id: cache-playwright-browsers
         uses: actions/cache@v6
         with:
@@ -41,15 +52,22 @@ jobs:
           key: ${{ steps.playwright-version.outputs.version }}-playwright-browsers-chromium
 
       - name: Install Playwright Browsers
-        if: steps.changes.outputs.has_changes == 'true' && steps.cache-playwright-browsers.outputs.cache-hit != 'true'
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true') && steps.cache-playwright-browsers.outputs.cache-hit != 'true'
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Build packages and auth-test-studio
-        if: steps.changes.outputs.has_changes == 'true'
+        if: github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true'
         run: pnpm build --filter=auth-test-studio...
 
-      - name: Run auth E2E tests
-        if: steps.changes.outputs.has_changes == 'true'
+      - name: Run auth E2E tests (Playwright baseline)
+        if: matrix.runner == 'playwright' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
         run: pnpm --filter e2e test:auth
+        env:
+          CI: "true"
+
+      - name: Run auth E2E tests (Endform)
+        if: matrix.runner == 'endform' && (github.event_name == 'workflow_dispatch' || steps.changes.outputs.has_changes == 'true')
+        working-directory: e2e
+        run: npx --yes endform@latest test --organization-id 2G1ZCj7X --config=playwright.auth.config.ts
         env:
           CI: "true"
